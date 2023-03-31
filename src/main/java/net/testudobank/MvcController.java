@@ -33,6 +33,9 @@ public class MvcController {
   // Formatter for converting Java Dates to SQL-compatible DATETIME Strings
   private static java.text.SimpleDateFormat SQL_DATETIME_FORMATTER = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
 
+  //Flag to whether deposit or not
+  private static boolean DEPOSITED = false;
+
   //// CONSTANT LITERALS ////
   public final static double INTEREST_RATE = 1.02;
   private final static int MAX_OVERDRAFT_IN_PENNIES = 100000;
@@ -42,6 +45,7 @@ public class MvcController {
   private final static int MAX_REVERSABLE_TRANSACTIONS_AGO = 3;
   private final static String HTML_LINE_BREAK = "<br/>";
   public static String TRANSACTION_HISTORY_DEPOSIT_ACTION = "Deposit";
+  public static String INTEREST_HISTORY_ACTION = "Interest";
   public static String TRANSACTION_HISTORY_WITHDRAW_ACTION = "Withdraw";
   public static String TRANSACTION_HISTORY_TRANSFER_SEND_ACTION = "TransferSend";
   public static String TRANSACTION_HISTORY_TRANSFER_RECEIVE_ACTION = "TransferReceive";
@@ -51,7 +55,6 @@ public class MvcController {
   public static String CRYPTO_HISTORY_BUY_ACTION = "Buy";
   public static Set<String> SUPPORTED_CRYPTOCURRENCIES = new HashSet<>(Arrays.asList("ETH", "SOL"));
   private static double BALANCE_INTEREST_RATE = 1.015;
-
   public MvcController(@Autowired JdbcTemplate jdbcTemplate, @Autowired CryptoPriceClient cryptoPriceClient) {
     this.jdbcTemplate = jdbcTemplate;
     this.cryptoPriceClient = cryptoPriceClient;
@@ -82,7 +85,8 @@ public class MvcController {
 	public String showLoginForm(Model model) {
 		User user = new User();
     model.addAttribute("user", user);
-
+    DEPOSITED = false;
+    // applyInterest(user);
 		return "login_form";
 	}
 
@@ -222,9 +226,11 @@ public class MvcController {
     for (String cryptoName : MvcController.SUPPORTED_CRYPTOCURRENCIES) {
       cryptoBalanceInDollars += TestudoBankRepository.getCustomerCryptoBalance(jdbcTemplate, user.getUsername(), cryptoName).orElse(0.0) * cryptoPriceClient.getCurrentCryptoValue(cryptoName);
     }
+    
 
     user.setFirstName((String)userData.get("FirstName"));
     user.setLastName((String)userData.get("LastName"));
+    user.setInterestRate((String)"1.5%");
     user.setBalance((int)userData.get("Balance")/100.0);
     double overDraftBalance = (int)userData.get("OverdraftBalance");
     user.setOverDraftBalance(overDraftBalance/100);
@@ -343,6 +349,11 @@ public class MvcController {
       }
 
     } else { // simple deposit case
+      int numDeposits = TestudoBankRepository.getCustomerNumberOfDepositsForInterest(jdbcTemplate, userID);
+      if (userDepositAmt>20.0){ //iff the deposit amount is above 20 dollars
+        DEPOSITED = true;
+        TestudoBankRepository.setCustomerNumberOfDepositsForInterest(jdbcTemplate, userID, numDeposits+1);
+      }
       TestudoBankRepository.increaseCustomerCashBalance(jdbcTemplate, userID, userDepositAmtInPennies);
     }
 
@@ -359,10 +370,15 @@ public class MvcController {
 
     // update Model so that View can access new main balance, overdraft balance, and logs
     applyInterest(user);
+    DEPOSITED = false;
     updateAccountInfo(user);
     return "account_info";
   }
-	
+	/* Helper method to calculate the interest. Used in line 417*/
+  private double applyInterestRateToPennyAmount(int pennyAmount){
+    return pennyAmount * INTEREST_RATE;
+  }
+
   /**
    * HTML POST request handler for the Withdraw Form page.
    * 
@@ -410,7 +426,7 @@ public class MvcController {
     int userOverdraftBalanceInPennies = TestudoBankRepository.getCustomerOverdraftBalanceInPennies(jdbcTemplate, userID);
     if (userWithdrawAmtInPennies > userBalanceInPennies) { // if withdraw amount exceeds main balance, withdraw into overdraft with interest fee
       int excessWithdrawAmtInPennies = userWithdrawAmtInPennies - userBalanceInPennies;
-      int newOverdraftIncreaseAmtAfterInterestInPennies = (int)(excessWithdrawAmtInPennies * INTEREST_RATE);
+      int newOverdraftIncreaseAmtAfterInterestInPennies = (int) applyInterestRateToPennyAmount(excessWithdrawAmtInPennies); /**************** */
       int newOverdraftBalanceInPennies = userOverdraftBalanceInPennies + newOverdraftIncreaseAmtAfterInterestInPennies;
 
       // abort withdraw transaction if new overdraft balance exceeds max overdraft limit
@@ -805,7 +821,19 @@ public class MvcController {
    * @return "account_info" if interest applied. Otherwise, redirect to "welcome" page.
    */
   public String applyInterest(@ModelAttribute("user") User user) {
-
+    //every 5 deposits, starting from 1st deposit, count deposit (iff above 20, checked in deposit)
+    String customerID =  user.getUsername();
+    int numDeposits = TestudoBankRepository.getCustomerNumberOfDepositsForInterest(jdbcTemplate, customerID);
+    int balance = TestudoBankRepository.getCustomerCashBalanceInPennies(jdbcTemplate, customerID);
+    int newAmount = (int) (BALANCE_INTEREST_RATE*balance);
+    String currTime = SQL_DATETIME_FORMATTER.format(new java.util.Date());
+    int overdraft = TestudoBankRepository.getCustomerOverdraftBalanceInPennies(jdbcTemplate, customerID);
+    // For every 5 deposits, no overdraft, and balance above zero -> interest rate is applied
+    if (overdraft <= 0.0 && balance > 0.0 && numDeposits > 0 && DEPOSITED && numDeposits % 5 == 0) {
+      TestudoBankRepository.setCustomerCashBalance(jdbcTemplate, customerID, newAmount);
+      TestudoBankRepository.insertRowToTransactionHistoryTable(jdbcTemplate, customerID, currTime, TRANSACTION_HISTORY_DEPOSIT_ACTION, newAmount);
+      return "account_info";
+    }
     return "welcome";
 
   }

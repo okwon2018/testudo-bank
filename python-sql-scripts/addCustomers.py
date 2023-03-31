@@ -57,6 +57,7 @@ CREATE TABLE TransactionHistory (
 '''
 cursor.execute(create_transactionhistory_table_sql)
 
+
 # Make empty Transfer table
 create_transferhistory_table_sql = '''
 CREATE TABLE TransferHistory (
